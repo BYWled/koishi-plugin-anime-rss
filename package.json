@@ -1,0 +1,62 @@
+{
+  "name": "koishi-plugin-anime-rss",
+  "version": "1.0.0",
+  "description": "RSS 番剧订阅与流式下载推送插件，支持种子流式下载、内存防爆与群文件智能分流",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist",
+    "bin",
+    "readme.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test --import tsx tests/*.spec.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.5"
+  },
+  "koishi": {
+    "description": {
+      "en": "RSS anime subscription and stream-download push plugin with memory optimization",
+      "zh": "RSS 番剧订阅与流式下载推送插件，内置内存防爆与群文件智能分流"
+    },
+    "service": {
+      "required": [
+        "database"
+      ]
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin",
+    "rss",
+    "anime",
+    "torrent",
+    "bangumi",
+    "番剧",
+    "订阅"
+  ],
+  "author": {
+    "name": "BYWled",
+    "email": "bywled@qq.com",
+    "url": "https://github.com/BYWled"
+  },
+  "homepage": "https://github.com/BYWled/koishi-plugin-anime-rss",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BYWled/koishi-plugin-anime-rss.git"
+  },
+  "peerDependencies": {
+    "koishi": "^4.18.11"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.11.2",
+    "torrent-stream": "^1.2.1"
+  }
+}
