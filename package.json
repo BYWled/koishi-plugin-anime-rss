@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-anime-rss",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "RSS 番剧订阅与流式下载推送插件，支持种子流式下载、内存防爆与群文件智能分流",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",

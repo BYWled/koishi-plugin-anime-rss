@@ -1,5 +1,6 @@
 import { Context, Session } from 'koishi'
 import { Config } from './types'
+import { TrackerManager } from './tracker'
 import {
   getDatabaseSubscriptions,
   addDatabaseSubscription,
@@ -10,7 +11,8 @@ import { fetchAndParseRss } from './rss'
 export function registerCommands(
   ctx: Context,
   config: Config,
-  triggerCheck: (channelId?: string, options?: { maxItems?: number }) => Promise<string>
+  triggerCheck: (channelId?: string, options?: { maxItems?: number }) => Promise<string>,
+  trackerManager?: TrackerManager
 ) {
   const cmd = ctx.command('anime-rss', 'RSS 番剧订阅与推送管理')
 
@@ -24,6 +26,7 @@ export function registerCommands(
       '  anime-rss.remove <id>       删除指定 ID 的订阅',
       '  anime-rss.list              查看当前群生效的番剧订阅列表',
       '  anime-rss.check             立即执行一次订阅检查与更新探测',
+      '  anime-rss.tracker           查看或更新当前 BT Tracker 服务器池',
     ].join('\n')
   })
 
@@ -165,5 +168,31 @@ export function registerCommands(
       } catch (err: any) {
         return `❌ 检查过程发生异常: ${err?.message}`
       }
+    })
+
+  cmd
+    .subcommand('.tracker', '查看或更新当前 BT Tracker 节点池状态')
+    .option('update', '-u, --update 立即从国内外多镜像源强制同步最新 Tracker 列表')
+    .action(async ({ session, options }) => {
+      if (!trackerManager) {
+        return 'Tracker 管理器未就绪。'
+      }
+
+      if (options?.update) {
+        await session?.send('📡 正在从全网优质镜像源同步最新 BT Tracker 列表，请稍候...')
+        const count = await trackerManager.syncTrackers(ctx, true)
+        return `✅ Tracker 同步完成！当前池中活跃 Tracker 总数：${count} 个（已持久化缓存并就绪）。`
+      }
+
+      const trackers = trackerManager.getTrackers(config.customTrackers || [])
+      const sample = trackers.slice(0, 5).join('\n  • ')
+      return [
+        '📡 === BT Tracker 状态 ===',
+        `• 可用 Tracker 节点总数：${trackers.length} 个`,
+        '• DHT 持久化路由表：已启用（dht.dat + dht6.dat）',
+        '• 多镜像自动同步：' + (config.trackerSync !== false ? '已开启' : '已关闭'),
+        '• 提示：使用 `anime-rss.tracker -u` 可立即强制从镜像源刷新最新节点列表。',
+        `\n[部分优质节点预览]：\n  • ${sample}`,
+      ].join('\n')
     })
 }

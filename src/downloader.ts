@@ -3,24 +3,13 @@ import path from 'path'
 import { spawn } from 'child_process'
 import torrentStream from 'torrent-stream'
 import { DownloadResult } from './types'
+import {
+  TrackerManager,
+  DEFAULT_FALLBACK_TRACKERS,
+  DHT_BOOTSTRAP_NODES,
+} from './tracker'
 
-export const DEFAULT_TRACKERS = [
-  'http://open.acgtracker.com:1096/announce',
-  'udp://tracker4.itzmx.com:2710/announce',
-  'udp://tracker.opentrackr.org:1337/announce',
-  'http://nyaa.tracker.wf:7777/announce',
-  'udp://tracker.torrent.eu.org:451/announce',
-  'udp://open.stealth.si:80/announce',
-  'udp://exodus.desync.com:6969/announce',
-  'udp://tracker.dler.org:6969/announce',
-  'udp://tracker.renfei.net:8080/announce',
-  'udp://p4p.arenabg.com:1337/announce',
-  'udp://tracker.mywaifu.best:6969/announce',
-  'https://t.213891.xyz:443/announce',
-  'https://tracker.foreverpirates.co:443/announce',
-  'https://tracker.nanoha.org:443/announce',
-  'udp://tracker.moeking.me:6969/announce',
-]
+export const DEFAULT_TRACKERS = DEFAULT_FALLBACK_TRACKERS
 
 const VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.ts', '.flv', '.webm', '.mov']
 
@@ -101,30 +90,43 @@ export class DownloaderQueue {
     })
   }
 
-  private async processNext() {
-    if (this.isProcessing) return
-    const item = this.queue.shift()
-    if (!item) return
+  private async processNext(): Promise<void> {
+    if (this.isProcessing || this.queue.length === 0) {
+      return
+    }
 
     this.isProcessing = true
+    const current = this.queue.shift()!
+
     try {
-      const result = await item.fn()
-      item.resolve(result)
+      const result = await current.fn()
+      current.resolve(result)
     } catch (err) {
-      item.reject(err)
+      current.reject(err)
     } finally {
       this.isProcessing = false
-      this.processNext()
+      if (this.queue.length > 0) {
+        setImmediate(() => this.processNext())
+      }
     }
   }
 
-  public get pendingCount(): number {
+  public get pending(): number {
     return this.queue.length
   }
 
-  public get active(): boolean {
+  public get busy(): boolean {
     return this.isProcessing
   }
+}
+
+export interface DownloadOptions {
+  timeoutMs?: number
+  httpGetter?: (url: string) => Promise<ArrayBuffer>
+  stalledTimeoutMs?: number
+  onProgress?: (progressStr: string) => void
+  trackerManager?: TrackerManager
+  customTrackers?: string[]
 }
 
 export async function downloadViaAria2(
@@ -134,7 +136,10 @@ export async function downloadViaAria2(
   timeoutMs = 30 * 60 * 1000,
   httpGetter?: (url: string) => Promise<ArrayBuffer>,
   stalledTimeoutMs = 120 * 1000,
-  onProgress?: (progressStr: string) => void
+  onProgress?: (progressStr: string) => void,
+  trackerManager?: TrackerManager,
+  customTrackers: string[] = [],
+  listenPort = '51413-51425'
 ): Promise<DownloadResult> {
   const taskId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   const taskDir = path.join(outputDir, taskId)
@@ -143,56 +148,98 @@ export async function downloadViaAria2(
   let targetArg = ''
   let torrentFilePath = ''
 
+  // 1. 尝试优先获取种子文件（带完整容错与备用降级）
   if (source.torrentUrl) {
     if (httpGetter) {
       try {
         const arrayBuf = await httpGetter(source.torrentUrl)
-        torrentFilePath = path.join(taskDir, 'source.torrent')
-        await fs.promises.writeFile(torrentFilePath, Buffer.from(arrayBuf))
-        targetArg = torrentFilePath
+        if (arrayBuf && arrayBuf.byteLength > 50) {
+          const firstByte = new Uint8Array(arrayBuf)[0]
+          // 必须以 ASCII 字符 'd' (0x64) 开头才为合法的 Bencode 字典，防止将 403/Cloudflare 等 HTML 误存为种子
+          if (firstByte === 0x64) {
+            torrentFilePath = path.join(taskDir, 'source.torrent')
+            await fs.promises.writeFile(torrentFilePath, Buffer.from(arrayBuf))
+            targetArg = torrentFilePath
+          }
+        }
       } catch {
-        targetArg = source.torrentUrl
+        // httpGetter 失败（如大陆环境无法直接连通外网种子服务器）
       }
-    } else {
-      targetArg = source.torrentUrl
     }
-  } else if (source.magnetUrl) {
-    targetArg = source.magnetUrl
-  } else if (source.infoHash) {
-    targetArg = `magnet:?xt=urn:btih:${source.infoHash}`
-  } else {
-    throw new Error('No valid torrent URL, magnet, or infoHash provided for aria2')
   }
 
-  const trackerArg = DEFAULT_TRACKERS.join(',')
+  // 2. 若种子文件下载失败，绝不能直接把不可达的 HTTP URL 传给 aria2（会导致死锁）
+  // 必须平滑降级为注入了全网最佳 Trackers 的磁力链接
+  if (!targetArg) {
+    const rawMagnet =
+      source.magnetUrl ||
+      (source.infoHash ? `magnet:?xt=urn:btih:${source.infoHash}` : '')
 
+    if (rawMagnet) {
+      targetArg = trackerManager
+        ? trackerManager.injectTrackersIntoMagnet(rawMagnet)
+        : rawMagnet
+    } else if (source.torrentUrl) {
+      // 没有任何磁力信息时才回退至原始 torrentUrl
+      targetArg = source.torrentUrl
+    } else {
+      throw new Error('No valid torrent URL, magnet, or infoHash provided for aria2')
+    }
+  }
+
+  // 3. 组装高可用 Tracker 列表（合并动态同步源 + 内置精选源 + 用户自定义源）
+  const activeTrackers = trackerManager
+    ? trackerManager.getTrackers(customTrackers)
+    : DEFAULT_FALLBACK_TRACKERS.concat(customTrackers)
+  const trackerArg = activeTrackers.join(',')
+
+  // 4. 组装 DHT 与 P2P 参数（参考 Motrix Next、qBittorrent 与 P3TERX 最佳实践）
   const args = [
     '--seed-time=0',
     '--summary-interval=5',
     '--file-allocation=none',
+    '--check-certificate=false', // 允许连接无系统根证书或自签名的 HTTPS Trackers，避免 Windows 环境 TLS 握手失败
+    '--bt-force-encryption=true', // 强制混淆握手与加密传输（防国内运营商 DPI 深度包检测阻断，同时兼容强制加密的海外做种者）
+    `--listen-port=${listenPort}`, // 规避国内运营商对 6881-6999 BT 默认端口的阻断与 QoS 限速
+    `--dht-listen-port=${listenPort}`,
     '--peer-id-prefix=-qB4630-',
+    '--peer-agent=qBittorrent/4.6.3', // 伪装 BEP 10 扩展握手 Client Agent，避免被海外做种者或防吸血策略 Choke
     '--user-agent=qBittorrent/4.6.3',
     '--enable-peer-exchange=true',
     '--enable-dht=true',
-    '--enable-dht6=false',
-    '--dht-listen-port=6881-6999',
-    '--listen-port=6881-6999',
-    '--bt-enable-lpd=true',
-    '--bt-max-peers=80',
+    '--enable-dht6=false', // 国内多数环境未开通 IPv6 或 IPv6 UDP 黑洞，优先专注 IPv4 DHT 避免超时挂起
+    '--bt-enable-lpd=true', // 开启本地对等发现（Local Peer Discovery）
+    '--bt-max-peers=128',
+    '--bt-request-peer-speed-limit=10M', // 低速时积极扩大并发向所有已连接 Peer/Seed 索取分片，大幅改善初始连接做种者速度
     '--max-connection-per-server=16',
     '--split=16',
     '--min-split-size=1M',
-    '--max-upload-limit=1M',
-    '--bt-tracker-connect-timeout=5',
-    '--bt-tracker-timeout=5',
-    '--dht-entry-point=dht.transmissionbt.com:6881',
-    '--dht-entry-point=router.bittorrent.com:6881',
-    '--dht-entry-point=router.utorrent.com:6881',
-    `--bt-tracker=${trackerArg}`,
-    '--follow-torrent=mem',
-    `--dir=${taskDir}`,
-    targetArg,
+    '--max-upload-limit=2M',
+    // 增加连接握手超时，适应国内跨境网络高丢包高延迟环境
+    '--bt-tracker-connect-timeout=10',
+    '--bt-tracker-timeout=10',
+    '--bt-tracker-interval=120', // 每 120 秒重新向所有 Tracker 汇报以快速捕获新入网做种者
+    '--bt-save-metadata=true',
+    '--bt-load-saved-metadata=true',
+    '--bt-prioritize-piece=head,tail',
   ]
+
+  // 配置 DHT 路由表持久化，避免每次重启从 0 节点冷启动
+  if (trackerManager) {
+    args.push(`--dht-file-path=${trackerManager.getDhtFilePath()}`)
+    args.push(`--dht-file-path6=${trackerManager.getDht6FilePath()}`)
+  }
+
+  // 注入全网公认可靠的高可用 DHT 引导节点
+  for (const node of DHT_BOOTSTRAP_NODES) {
+    args.push(`--dht-entry-point=${node}`)
+  }
+
+  // 注入 Tracker 参数与任务目录
+  args.push(`--bt-tracker=${trackerArg}`)
+  args.push('--follow-torrent=mem')
+  args.push(`--dir=${taskDir}`)
+  args.push(targetArg)
 
   return new Promise<DownloadResult>((resolve, reject) => {
     let finished = false
@@ -223,7 +270,7 @@ export async function downloadViaAria2(
             const seeders = parseInt(sd, 10)
             const speedIsZero = dl.trim().startsWith('0B')
 
-            // Stalled detection: if 0 seeders and 0 speed for stalledTimeoutMs
+            // 死种熔断检测：若在设定时限内持续无做种者且速度为 0，跳出避免卡死队列
             if (seeders === 0 && speedIsZero) {
               if (now - zeroSpeedStart >= stalledTimeoutMs) {
                 if (!finished) {
@@ -235,11 +282,11 @@ export async function downloadViaAria2(
                 }
               }
             } else {
-              // Reset timer when there are seeders or speed > 0
+              // 检测到有做种者或有下载流量时，重置死种计时器
               zeroSpeedStart = now
             }
 
-            // Throttle progress log to at most once every 15 seconds
+            // 进度日志节流（每 15 秒最多输出一次，保持控制台整洁）
             if (now - lastLogTime >= 15000) {
               lastLogTime = now
               const prettyLog = `进度: ${percent} (${downloaded.trim()}/${total.trim()}) | 速度: ${dl.trim()} | 连接节点: ${cn} | 做种者: ${sd}`
@@ -250,22 +297,27 @@ export async function downloadViaAria2(
       }
     })
 
+    child.stderr.on('data', () => {
+      // aria2 stderr 抑制
+    })
+
     child.on('error', (err) => {
       if (!finished) {
         finished = true
         clearTimeout(timer)
+        fs.promises.rm(taskDir, { recursive: true, force: true }).catch(() => {})
         reject(err)
       }
     })
 
-    child.on('close', async (code) => {
+    child.on('close', (code) => {
       if (!finished) {
         finished = true
         clearTimeout(timer)
 
         if (code !== 0) {
           fs.promises.rm(taskDir, { recursive: true, force: true }).catch(() => {})
-          return reject(new Error(`Aria2 exited with error code ${code}`))
+          return reject(new Error(`Aria2 exited with non-zero exit code: ${code}`))
         }
 
         const video = findVideoFileRecursive(taskDir)
@@ -289,7 +341,9 @@ export async function downloadViaTorrentStream(
   source: { torrentUrl?: string; magnetUrl?: string; infoHash?: string },
   outputDir: string,
   timeoutMs = 30 * 60 * 1000,
-  httpGetter?: (url: string) => Promise<ArrayBuffer>
+  httpGetter?: (url: string) => Promise<ArrayBuffer>,
+  trackerManager?: TrackerManager,
+  customTrackers: string[] = []
 ): Promise<DownloadResult> {
   await fs.promises.mkdir(outputDir, { recursive: true })
 
@@ -312,6 +366,10 @@ export async function downloadViaTorrentStream(
   } else {
     throw new Error('No valid torrent URL, magnet, or infoHash provided for download')
   }
+
+  const trackers = trackerManager
+    ? trackerManager.getTrackers(customTrackers)
+    : DEFAULT_FALLBACK_TRACKERS.concat(customTrackers)
 
   return new Promise<DownloadResult>((resolve, reject) => {
     let finished = false
@@ -347,12 +405,9 @@ export async function downloadViaTorrentStream(
     try {
       engine = torrentStream(torrentTarget, {
         path: outputDir,
-        connections: 50,
-        uploads: 1,
-        trackers: DEFAULT_TRACKERS,
+        connections: 80,
+        trackers,
       })
-
-      engine.listen()
 
       engine.on('error', (err: any) => {
         if (!finished) {
@@ -364,19 +419,20 @@ export async function downloadViaTorrentStream(
       })
 
       engine.on('ready', () => {
-        if (finished) return
+        const files: any[] = engine.files || []
+        const candidates = files.filter((f) => isVideoFile(f.name))
 
-        const files = engine.files || []
-        if (files.length === 0) {
-          finished = true
-          clearTimeout(timer)
-          cleanup()
-          return reject(new Error('Torrent contains no files'))
+        if (candidates.length === 0) {
+          if (!finished) {
+            finished = true
+            clearTimeout(timer)
+            cleanup()
+            reject(new Error('No video file found in torrent content'))
+          }
+          return
         }
 
-        const videoFiles = files.filter((f: any) => isVideoFile(f.name))
-        const candidates = videoFiles.length > 0 ? videoFiles : files
-        candidates.sort((a: any, b: any) => (b.length || 0) - (a.length || 0))
+        candidates.sort((a, b) => b.length - a.length)
         const chosenFile = candidates[0]
 
         for (const f of files) {
@@ -461,15 +517,25 @@ export async function downloadTorrentItem(
   customAria2Path?: string,
   forceEngine?: 'builtin-aria2' | 'torrent-stream',
   stalledTimeoutMs = 120 * 1000,
-  onProgress?: (progressStr: string) => void
+  onProgress?: (progressStr: string) => void,
+  trackerManager?: TrackerManager,
+  customTrackers: string[] = [],
+  listenPort = '51413-51425'
 ): Promise<DownloadResult> {
   const aria2Bin = resolveAria2Binary(customAria2Path)
 
   if (forceEngine === 'torrent-stream' || !aria2Bin) {
-    return downloadViaTorrentStream(source, outputDir, timeoutMs, httpGetter)
+    return downloadViaTorrentStream(
+      source,
+      outputDir,
+      timeoutMs,
+      httpGetter,
+      trackerManager,
+      customTrackers
+    )
   }
 
-  // Use Aria2 as default high-performance engine
+  // 默认使用原生高性能 Aria2 引擎
   return downloadViaAria2(
     aria2Bin,
     source,
@@ -477,6 +543,9 @@ export async function downloadTorrentItem(
     timeoutMs,
     httpGetter,
     stalledTimeoutMs,
-    onProgress
+    onProgress,
+    trackerManager,
+    customTrackers,
+    listenPort
   )
 }

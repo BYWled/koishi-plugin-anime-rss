@@ -10,6 +10,7 @@ import {
 } from './database'
 import { fetchAndParseRss } from './rss'
 import { DownloaderQueue, downloadTorrentItem } from './downloader'
+import { TrackerManager } from './tracker'
 import { pushAnimeVideo } from './sender'
 import { registerCommands } from './commands'
 
@@ -23,6 +24,7 @@ export const inject = {
 export interface Config {
   downloader: 'builtin-aria2' | 'torrent-stream'
   aria2CustomPath?: string
+  listenPort?: string
   stalledTimeout: number
   checkInterval: number
   downloadTimeout: number
@@ -33,63 +35,93 @@ export interface Config {
   uploadTimeout: number
   serverHost?: string
   serverPort?: number
+  trackerSync?: boolean
+  customTrackers?: string[]
   subscriptions: SubscriptionItem[]
 }
 
-export const Config: Schema<Config> = Schema.object({
-  downloader: Schema.union(['builtin-aria2', 'torrent-stream'])
-    .default('builtin-aria2')
-    .description('种子下载引擎：builtin-aria2（内置高速 Aria2 原生引擎，推荐）/ torrent-stream（Node.js 引擎）'),
-  aria2CustomPath: Schema.string()
-    .description('自定义 aria2 可执行文件路径（留空则自动使用插件内置的 bin/aria2c 或系统 PATH 中的 aria2c）'),
-  stalledTimeout: Schema.number()
-    .default(120)
-    .description('无做种者(死种)熔断时限（秒）。若在此时间内全网做种数(SD)持续为 0 且无流量，自动跳过并推送备用磁力链接，避免卡死下载队列'),
-  checkInterval: Schema.number()
-    .default(15)
-    .description('RSS 轮询间隔（分钟）'),
-  downloadTimeout: Schema.number()
-    .default(30)
-    .description('单集种子下载超时时间（分钟）'),
-  uploadTimeout: Schema.number()
-    .default(10)
-    .description('群文件上传超时时限（分钟），解决大文件上传耗时较长被协议端默认 60 秒熔断的问题'),
-  videoSizeThreshold: Schema.number()
-    .default(80)
-    .description('普通群视频直发上限（MB），超出自动转为上传群文件'),
-  storagePath: Schema.string()
-    .default('data/anime-rss/temp')
-    .description('临时视频与种子文件下载存储路径（相对工作区）'),
-  autoClean: Schema.boolean()
-    .default(true)
-    .description('推送成功后是否自动删除本地临时视频与种子缓存'),
-  cleanDelay: Schema.number()
-    .default(10)
-    .description('推送成功到删除临时文件的延迟时间（秒）'),
-  serverHost: Schema.string()
-    .description('远端协议端获取视频文件时的本机 IP 或域名（留空则自动检测与协议端同网段的局域网/内网 IP）'),
-  serverPort: Schema.number()
-    .default(0)
-    .description('文件传输临时 HTTP 服务端口（0 为使用系统随机空闲端口）'),
-  subscriptions: Schema.array(
-    Schema.object({
-      name: Schema.string().required().description('番剧订阅名称'),
-      url: Schema.string().required().description('RSS 订阅链接'),
-      channels: Schema.array(Schema.string())
-        .role('table')
-        .description('推送目标群号或频道（如 123456789 或 onebot:123456789）'),
-      include: Schema.array(Schema.string()).description('必须包含的过滤关键词'),
-      exclude: Schema.array(Schema.string()).description('排除的过滤关键词'),
-      enabled: Schema.boolean().default(true).description('是否启用此订阅'),
-    })
-  )
-    .default([])
-    .description('控制台配置的全局静态订阅列表'),
-})
+export const Config: Schema<Config> = Schema.intersect([
+  Schema.object({
+    downloader: Schema.union(['builtin-aria2', 'torrent-stream'])
+      .default('builtin-aria2')
+      .description('种子下载引擎：builtin-aria2（内置原生高速 Aria2 原生引擎，推荐）/ torrent-stream（轻量 Node.js 引擎）'),
+    aria2CustomPath: Schema.string()
+      .description('自定义 aria2 可执行文件路径（留空则自动使用插件内置的 bin/aria2c 或系统 PATH 中的 aria2c）'),
+    listenPort: Schema.string()
+      .default('51413-51425')
+      .description('BT 与 DHT 监听端口范围（默认 51413-51425，规避国内运营商对 6881-6999 的封锁与 QoS 限速）'),
+    stalledTimeout: Schema.number()
+      .default(180)
+      .description('无做种者(死种)熔断时限（秒）。若在此时间内全网做种数(SD)持续为 0 且无流量，自动跳过并推送备用磁力链接，避免卡死下载队列'),
+    downloadTimeout: Schema.number()
+      .default(30)
+      .description('单集种子下载超时时间（分钟），超时后自动中止释放'),
+  }).description('下载引擎设置'),
+
+  Schema.object({
+    trackerSync: Schema.boolean()
+      .default(true)
+      .description('是否自动从国内多镜像源（XIU2/TrackersList 等）动态同步最新活跃 BT Tracker 列表（推荐开启，大幅提升做种者连接率与下载速度）'),
+    customTrackers: Schema.array(Schema.string())
+      .role('table')
+      .default([])
+      .description('用户自定义追加的 BT Tracker 地址列表（支持 HTTP/HTTPS/UDP）'),
+  }).description('Tracker 与 P2P 网络优化'),
+
+  Schema.object({
+    checkInterval: Schema.number()
+      .default(15)
+      .description('RSS 订阅源自动轮询间隔（分钟）。设为 0 则不自动轮询，仅通过指令触发'),
+    videoSizeThreshold: Schema.number()
+      .default(80)
+      .description('普通群视频直发上限（MB）。超出此体积自动转为上传群文件，突破 QQ/OneBot 视频大小限制与画质压缩'),
+    uploadTimeout: Schema.number()
+      .default(10)
+      .description('群文件上传超时时限（分钟）。解决大文件上传耗时较长被协议端底层默认 60 秒硬超时熔断的问题'),
+  }).description('推送与轮询设置'),
+
+  Schema.object({
+    storagePath: Schema.string()
+      .default('data/anime-rss/temp')
+      .description('临时视频与种子文件下载存储路径（相对工作区）'),
+    autoClean: Schema.boolean()
+      .default(true)
+      .description('推送成功后是否自动删除本地临时视频与种子缓存（零磁盘积压）'),
+    cleanDelay: Schema.number()
+      .default(10)
+      .description('推送成功到删除临时文件的缓冲延迟时间（秒）'),
+  }).description('存储与自动清理'),
+
+  Schema.object({
+    serverHost: Schema.string()
+      .description('跨机/容器协议端回连 IP 或域名（留空自动探测与协议端同网段的内网 IP；Docker 或跨主机部署若无法直通可在此手动填写）'),
+    serverPort: Schema.number()
+      .default(0)
+      .description('文件传输临时 HTTP 服务端口（0 为使用系统随机空闲端口）'),
+  }).description('跨机与容器协议端网络设置'),
+
+  Schema.object({
+    subscriptions: Schema.array(
+      Schema.object({
+        name: Schema.string().required().description('番剧订阅名称（例如：罗小黑战记）'),
+        url: Schema.string().required().description('RSS 订阅链接（以 http:// 或 https:// 开头）'),
+        channels: Schema.array(Schema.string())
+          .role('table')
+          .description('推送目标群号或频道（如 123456789 或 onebot:123456789）'),
+        include: Schema.array(Schema.string()).description('必须包含的过滤关键词（如 1080p, 简日）'),
+        exclude: Schema.array(Schema.string()).description('排除的过滤关键词（如 720p, 繁体）'),
+        enabled: Schema.boolean().default(true).description('是否启用此订阅'),
+      })
+    )
+      .default([])
+      .description('控制台配置的全局静态订阅列表（界面直观，重启常驻）'),
+  }).description('全局静态订阅管理'),
+])
 
 export function apply(ctx: Context, config: Config) {
   const logger = new Logger('[anime-rss]')
   const downloaderQueue = new DownloaderQueue()
+  const trackerManager = new TrackerManager(ctx.baseDir)
 
   // 1. 初始化数据库表结构
   initDatabase(ctx)
@@ -97,6 +129,20 @@ export function apply(ctx: Context, config: Config) {
   // 2. 确保下载目录存在
   const absoluteStoragePath = path.resolve(ctx.baseDir, config.storagePath)
   fs.mkdirSync(absoluteStoragePath, { recursive: true })
+
+  // 3. 异步同步优质 Tracker（非阻塞）
+  if (config.trackerSync !== false) {
+    trackerManager.syncTrackers(ctx).catch((err) => {
+      logger.warn(`[tracker] 初始同步 Tracker 异常: ${err?.message}`)
+    })
+
+    // 每 12 小时定时自动刷新一次在线 Tracker 源
+    ctx.setInterval(() => {
+      if (config.trackerSync !== false) {
+        trackerManager.syncTrackers(ctx).catch(() => {})
+      }
+    }, 12 * 3600 * 1000)
+  }
 
   // 寻找合适 Bot 实例的辅助方法
   function resolveBot(platform?: string, channelId?: string): Bot | undefined {
@@ -210,10 +256,13 @@ export function apply(ctx: Context, config: Config) {
                 },
                 config.aria2CustomPath,
                 config.downloader,
-                (config.stalledTimeout || 120) * 1000,
+                (config.stalledTimeout || 180) * 1000,
                 (progressStr) => {
                   logger.info(`[downloader] ${progressStr}`)
-                }
+                },
+                trackerManager,
+                config.customTrackers || [],
+                config.listenPort || '51413-51425'
               )
             })
 
@@ -321,7 +370,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 4. 注册指令系统
-  registerCommands(ctx, config, (channelId, options) => runCheckCycle(channelId, options))
+  registerCommands(ctx, config, (channelId, options) => runCheckCycle(channelId, options), trackerManager)
 
   // 5. 启动定时检查任务
   if (config.checkInterval > 0) {

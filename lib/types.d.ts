@@ -9,6 +9,7 @@ export interface SubscriptionItem {
 export interface Config {
     downloader: 'builtin-aria2' | 'torrent-stream';
     aria2CustomPath?: string;
+    listenPort?: string;
     stalledTimeout: number;
     checkInterval: number;
     downloadTimeout: number;
@@ -19,6 +20,8 @@ export interface Config {
     uploadTimeout: number;
     serverHost?: string;
     serverPort?: number;
+    trackerSync?: boolean;
+    customTrackers?: string[];
     subscriptions: SubscriptionItem[];
 }
 export interface RssAnimeSubscription {
