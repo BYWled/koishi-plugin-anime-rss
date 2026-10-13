@@ -23,7 +23,7 @@
 
 本插件为 Koishi 机器人提供全自动 RSS 番剧订阅、种子高速下载与群推送能力。针对番剧视频文件体积庞大（数百兆至数吉字节）以及国内复杂的 BitTorrent 跨境网络环境，全流程贯彻零堆内存滞留（Zero-Heap Retention）设计与深度网络穿透优化，完美兼容同机与跨机协议端（OneBot / NapCat / LLOneBot 等），保障长周期挂机稳定不爆内存。
 
-> 版本：**1.0.1**
+> 版本：**1.0.2**
 
 ---
 
@@ -31,13 +31,14 @@
 
 - ⚡ **原生 Aria2 高性能下载引擎**：
   - **免配置开箱即用**：插件免配置内置便携式 Aria2 原生引擎，告别传统 Node.js 库常年无速度死种问题。
-  - **规避运营商端口封锁**：默认监听标准安全高位端口段（`51413-51425`），彻底告别国内运营商对 `6881-6999` BT 端口的恶劣封锁与 QoS 丢包。
+  - **多段容灾监听端口（`51413-51425,6881-6999,16881-16899`）**：彻底解决 Windows Hyper-V / NAT 动态端口排除导致 UDP 端口绑定失败（`DHT is disabled`）及 UDP Tracker 无法连通的问题，同时规避国内运营商 QoS 封锁。
   - **全流量混淆加密（`--bt-force-encryption=true`）**：强制开启 BitTorrent 握手与数据传输加密，绕过运营商 DPI 深度包检测拦截，并无缝兼容海外强制要求加密连接的优质 Seedbox 做种者。
+  - **死种 Tracker 强制剔除（`--bt-exclude-tracker=*`）**：强力清除种子文件内嵌的历史死种 Trackers，避免 Aria2 逐层超时等待挂起，将全网活跃 Tracker 提升至 Tier 1 首位发起并发握手。
   - **HTTPS Tracker 证书穿透**：针对 Windows 环境优化，解决便携版下载器因缺少 CA 根证书导致无法连接 HTTPS Tracker 的问题。
   - **完整客户端伪装**：底层握手全面伪装为 `qBittorrent/4.6.3`（含 Client Agent 与 Peer-ID 扩展握手），杜绝被海外做种端反吸血机制误判 Choke。
 - 📡 **全网热门 BT Tracker 动态加速池**：
-  - 内置精选 60+ 活跃二次元与通用 Tracker（覆盖 ACG.RIP、Nyaa、Camoe、Itzmx、Nanoha、LilithRaws 等）。
-  - 支持从国内外 5 大优质 CDN 镜像源定时自动拉取全网最新活跃 Tracker（如 XIU2 / TrackersList），并支持指令强制刷新。
+  - 内置精选 60+ 活跃二次元与通用 Tracker（覆盖 Nyaa、Itzmx、Camoe、Nanoha、LilithRaws 等高连通节点）。
+  - 支持从国内外优质 CDN 镜像源定时自动拉取全网最新活跃 Tracker（包含 XIU2、TrackersList 及 DeSireFire 动漫专用源），并支持自定义 `.txt` 订阅链接自动拉取展开。
   - 磁力链接自动注入 Tracker 参数，形成自洽高可用链接，加速 DHT 网络寻道与元数据解析。
 - 🛡️ **死种智能熔断与磁力降级**：
   - 实时监控做种健康度。当种子持续无活跃做种者（SD: 0）且无下载流量达到设定时限（默认 180 秒）时，自动跳过下载并向群内推送备用磁力链接，绝不卡死下载队列。

@@ -48,8 +48,8 @@ export const Config: Schema<Config> = Schema.intersect([
     aria2CustomPath: Schema.string()
       .description('自定义 aria2 可执行文件路径（留空则自动使用插件内置的 bin/aria2c 或系统 PATH 中的 aria2c）'),
     listenPort: Schema.string()
-      .default('51413-51425')
-      .description('BT 与 DHT 监听端口范围（默认 51413-51425，规避国内运营商对 6881-6999 的封锁与 QoS 限速）'),
+      .default('51413-51425,6881-6999,16881-16899')
+      .description('BT 与 DHT 监听端口范围（自带多段回退容灾，规避 Windows 端口排除与国内运营商 QoS 限速）'),
     stalledTimeout: Schema.number()
       .default(180)
       .description('无做种者(死种)熔断时限（秒）。若在此时间内全网做种数(SD)持续为 0 且无流量，自动跳过并推送备用磁力链接，避免卡死下载队列'),
@@ -65,7 +65,7 @@ export const Config: Schema<Config> = Schema.intersect([
     customTrackers: Schema.array(Schema.string())
       .role('table')
       .default([])
-      .description('用户自定义追加的 BT Tracker 地址列表（支持 HTTP/HTTPS/UDP）'),
+      .description('用户自定义追加的 BT Tracker 地址列表（支持 announce URL，亦支持直接填写 .txt 订阅链接如 https://.../ATaria2_best.txt 自动拉取展开）'),
   }).description('Tracker 与 P2P 网络优化'),
 
   Schema.object({
@@ -130,16 +130,16 @@ export function apply(ctx: Context, config: Config) {
   const absoluteStoragePath = path.resolve(ctx.baseDir, config.storagePath)
   fs.mkdirSync(absoluteStoragePath, { recursive: true })
 
-  // 3. 异步同步优质 Tracker（非阻塞）
+  // 3. 异步同步优质 Tracker（非阻塞，支持自定义订阅链接自动展开）
   if (config.trackerSync !== false) {
-    trackerManager.syncTrackers(ctx).catch((err) => {
+    trackerManager.syncTrackers(ctx, false, config.customTrackers || []).catch((err) => {
       logger.warn(`[tracker] 初始同步 Tracker 异常: ${err?.message}`)
     })
 
     // 每 12 小时定时自动刷新一次在线 Tracker 源
     ctx.setInterval(() => {
       if (config.trackerSync !== false) {
-        trackerManager.syncTrackers(ctx).catch(() => {})
+        trackerManager.syncTrackers(ctx, false, config.customTrackers || []).catch(() => {})
       }
     }, 12 * 3600 * 1000)
   }
@@ -262,7 +262,7 @@ export function apply(ctx: Context, config: Config) {
                 },
                 trackerManager,
                 config.customTrackers || [],
-                config.listenPort || '51413-51425'
+                config.listenPort || '51413-51425,6881-6999,16881-16899'
               )
             })
 

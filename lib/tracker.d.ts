@@ -27,15 +27,19 @@ export declare class TrackerManager {
      */
     private loadFromCache;
     /**
-     * 解析 Tracker 文本（兼容逗号分割与换行分割）
+     * 判断某个 URL 是否为 Tracker 订阅列表链接（如 .txt 结尾或订阅源）
+     */
+    static isSubscriptionUrl(url: string): boolean;
+    /**
+     * 解析 Tracker 文本（兼容逗号分割与换行分割，并自动过滤非法行与订阅文件路径）
      */
     parseTrackerString(content: string): string[];
     /**
-     * 同步在线优质 Tracker 列表（支持 Koishi ctx.http 代理穿透）
+     * 同步在线优质 Tracker 列表（支持 Koishi ctx.http 代理穿透与自定义订阅源扩展）
      */
-    syncTrackers(ctx?: Context, force?: boolean): Promise<number>;
+    syncTrackers(ctx?: Context, force?: boolean, extraSources?: string[]): Promise<number>;
     /**
-     * 获取合并后的完整可用 Tracker 列表（支持用户自定义追加）
+     * 获取合并后的完整可用 Tracker 列表（支持用户自定义追加，自动识别并过滤 .txt 订阅链接）
      */
     getTrackers(customTrackers?: string[]): string[];
     /**

@@ -7,17 +7,16 @@ import { Context, Logger } from 'koishi'
  * 涵盖国内外顶尖动漫及通用 Tracker（HTTP/HTTPS/UDP 多协议混合，保障穿透性）
  */
 export const DEFAULT_FALLBACK_TRACKERS: string[] = [
-  // 核心动漫与二次元专用 Tracker
-  'http://open.acgtracker.com:1096/announce',
+  // 核心动漫与二次元高可用 Tracker（已实测连通）
   'http://nyaa.tracker.wf:7777/announce',
-  'http://t.acg.rip:6699/announce',
-  'http://share.camoe.cn:8080/announce',
   'udp://tracker4.itzmx.com:2710/announce',
   'http://tracker4.itzmx.com:2710/announce',
+  'http://share.camoe.cn:8080/announce',
   'https://tracker.nanoha.org:443/announce',
   'https://tracker.lilithraws.org:443/announce',
   'udp://tracker.mywaifu.best:6969/announce',
   'https://tr.ready4.icu:443/announce',
+  'https://tracker.tamersunion.org:443/announce',
 
   // 高穿透性 HTTP/HTTPS Tracker（免疫国内运营商 UDP QoS 拦截）
   'https://t.213891.xyz:443/announce',
@@ -27,7 +26,6 @@ export const DEFAULT_FALLBACK_TRACKERS: string[] = [
   'http://bt2.archive.org:6969/announce',
   'http://tracker.dler.org:6969/announce',
   'http://tracker.renfei.net:8080/announce',
-  'https://tracker.tamersunion.org:443/announce',
   'https://tr.burnabyhighstar.com:443/announce',
   'http://tracker.ipv6tracker.ru:80/announce',
 
@@ -52,6 +50,10 @@ export const DEFAULT_FALLBACK_TRACKERS: string[] = [
   'udp://valakas.online:6969/announce',
   'udp://tc.animereactor.ru:8082/announce',
   'udp://new-line.net:6969/announce',
+
+  // 备用国内历史源
+  'http://open.acgtracker.com:1096/announce',
+  'http://t.acg.rip:6699/announce',
 ]
 
 /**
@@ -62,6 +64,7 @@ export const TRACKER_MIRROR_SOURCES = [
   'https://trackerslist.com/best_aria2.txt',
   'https://cf.trackerslist.com/http_aria2.txt',
   'https://fastly.jsdelivr.net/gh/XIU2/TrackersListCollection@master/best_aria2.txt',
+  'https://cdn.jsdelivr.net/gh/DeSireFire/animeTrackerList/ATaria2_best.txt',
   'https://ngosang.github.io/trackerslist/trackers_best.txt',
 ]
 
@@ -122,13 +125,26 @@ export class TrackerManager {
   }
 
   /**
-   * 解析 Tracker 文本（兼容逗号分割与换行分割）
+   * 判断某个 URL 是否为 Tracker 订阅列表链接（如 .txt 结尾或订阅源）
+   */
+  public static isSubscriptionUrl(url: string): boolean {
+    const trimmed = url.trim().toLowerCase()
+    return (
+      (trimmed.startsWith('http://') || trimmed.startsWith('https://')) &&
+      (trimmed.endsWith('.txt') || trimmed.includes('.txt?'))
+    )
+  }
+
+  /**
+   * 解析 Tracker 文本（兼容逗号分割与换行分割，并自动过滤非法行与订阅文件路径）
    */
   public parseTrackerString(content: string): string[] {
     return content
       .split(/[,\r\n]+/)
       .map((s) => s.trim())
       .filter((s) => {
+        if (!s) return false
+        if (s.endsWith('.txt') || s.includes('.txt?')) return false
         return (
           s.startsWith('http://') ||
           s.startsWith('https://') ||
@@ -139,9 +155,13 @@ export class TrackerManager {
   }
 
   /**
-   * 同步在线优质 Tracker 列表（支持 Koishi ctx.http 代理穿透）
+   * 同步在线优质 Tracker 列表（支持 Koishi ctx.http 代理穿透与自定义订阅源扩展）
    */
-  public async syncTrackers(ctx?: Context, force = false): Promise<number> {
+  public async syncTrackers(
+    ctx?: Context,
+    force = false,
+    extraSources: string[] = []
+  ): Promise<number> {
     const now = Date.now()
     // 默认 12 小时内不重复全网探测，除非强制更新
     if (!force && this.lastSyncTime > 0 && now - this.lastSyncTime < 12 * 3600 * 1000) {
@@ -149,8 +169,10 @@ export class TrackerManager {
     }
 
     const fetchedSet = new Set<string>()
+    const validExtra = extraSources.filter((s) => TrackerManager.isSubscriptionUrl(s))
+    const allSources = Array.from(new Set([...TRACKER_MIRROR_SOURCES, ...validExtra]))
 
-    for (const url of TRACKER_MIRROR_SOURCES) {
+    for (const url of allSources) {
       try {
         let text = ''
         if (ctx?.http) {
@@ -200,12 +222,15 @@ export class TrackerManager {
   }
 
   /**
-   * 获取合并后的完整可用 Tracker 列表（支持用户自定义追加）
+   * 获取合并后的完整可用 Tracker 列表（支持用户自定义追加，自动识别并过滤 .txt 订阅链接）
    */
   public getTrackers(customTrackers: string[] = []): string[] {
     const combined = new Set(this.inMemoryTrackers)
     for (const t of customTrackers) {
       const trimmed = t.trim()
+      if (TrackerManager.isSubscriptionUrl(trimmed)) {
+        continue
+      }
       if (
         trimmed.startsWith('http://') ||
         trimmed.startsWith('https://') ||

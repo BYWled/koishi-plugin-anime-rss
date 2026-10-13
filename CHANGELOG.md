@@ -2,6 +2,15 @@
 
 本项目的所有关键更改都将记录在此文件中。
 
+### [1.0.2]
+
+#### 🚀 P2P & Tracker Breakthrough (P2P与Tracker彻底提速)
+
+- **exclude-dead-trackers**: 引入 `--bt-exclude-tracker=*` 强制剔除种子文件与磁力链接中内嵌的 20+ 个历史失效 Trackers，消除 Aria2 按 Tier 逐级超时重试对主下载线程的阻塞，确保请求全部打在活跃的 Tier 1 Tracker 节点上。
+- **port-fallback**: 监听端口升级为多段容灾模式（`51413-51425,6881-6999,16881-16899`），彻底解决 Windows Hyper-V / NAT 动态端口排除导致 UDP 端口绑定失败（`DHT is disabled`）及 UDP Tracker 全面失效的问题。
+- **tracker-subscription-expand**: 增强 `customTrackers` 与 `syncTrackers` 对 `.txt` 订阅源链接（如 `ATaria2_best.txt`）的自动识别与展开拉取，并在直传参数中过滤订阅 URL 避免污染 Aria2 参数。
+- **anime-tracker-mirror**: 默认镜像源收录 `DeSireFire/animeTrackerList` 动漫专属 Tracker 订阅，优化静态备用节点连通性优先级。
+
 ### [1.0.1]
 
 #### 🚀 Performance & Connectivity (网络连通与做种提速)

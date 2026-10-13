@@ -66,3 +66,25 @@ test('TrackerManager: injectTrackersIntoMagnet should append tr parameters', () 
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 })
+
+test('TrackerManager: should detect subscription txt URLs and exclude them from direct tracker announce', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tracker-test-'))
+  try {
+    assert.ok(TrackerManager.isSubscriptionUrl('https://cdn.jsdelivr.net/gh/DeSireFire/animeTrackerList/ATaria2_best.txt'))
+    assert.ok(TrackerManager.isSubscriptionUrl('http://example.com/trackers.txt?version=1'))
+    assert.ok(!TrackerManager.isSubscriptionUrl('http://nyaa.tracker.wf:7777/announce'))
+    assert.ok(!TrackerManager.isSubscriptionUrl('udp://tracker4.itzmx.com:2710/announce'))
+
+    const manager = new TrackerManager(tmpDir)
+    const custom = [
+      'https://cdn.jsdelivr.net/gh/DeSireFire/animeTrackerList/ATaria2_best.txt',
+      'http://valid.custom.tracker/announce',
+    ]
+    const merged = manager.getTrackers(custom)
+    assert.ok(merged.includes('http://valid.custom.tracker/announce'))
+    assert.ok(!merged.includes('https://cdn.jsdelivr.net/gh/DeSireFire/animeTrackerList/ATaria2_best.txt'))
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+

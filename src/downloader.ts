@@ -139,7 +139,7 @@ export async function downloadViaAria2(
   onProgress?: (progressStr: string) => void,
   trackerManager?: TrackerManager,
   customTrackers: string[] = [],
-  listenPort = '51413-51425'
+  listenPort = '51413-51425,6881-6999,16881-16899'
 ): Promise<DownloadResult> {
   const taskId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   const taskDir = path.join(outputDir, taskId)
@@ -193,6 +193,11 @@ export async function downloadViaAria2(
     : DEFAULT_FALLBACK_TRACKERS.concat(customTrackers)
   const trackerArg = activeTrackers.join(',')
 
+  // 动态容灾端口范围：防止 Windows Hyper-V / NAT 动态端口排除导致 UDP 端口绑定失败进而使 DHT 与 UDP Tracker 失效
+  const effectiveListenPort = listenPort.includes(',')
+    ? listenPort
+    : `${listenPort},6881-6999,16881-16899`
+
   // 4. 组装 DHT 与 P2P 参数（参考 Motrix Next、qBittorrent 与 P3TERX 最佳实践）
   const args = [
     '--seed-time=0',
@@ -200,8 +205,8 @@ export async function downloadViaAria2(
     '--file-allocation=none',
     '--check-certificate=false', // 允许连接无系统根证书或自签名的 HTTPS Trackers，避免 Windows 环境 TLS 握手失败
     '--bt-force-encryption=true', // 强制混淆握手与加密传输（防国内运营商 DPI 深度包检测阻断，同时兼容强制加密的海外做种者）
-    `--listen-port=${listenPort}`, // 规避国内运营商对 6881-6999 BT 默认端口的阻断与 QoS 限速
-    `--dht-listen-port=${listenPort}`,
+    `--listen-port=${effectiveListenPort}`, // 规避国内运营商对 BT 默认端口的阻断与 QoS 限速，同时具备多段动态容灾
+    `--dht-listen-port=${effectiveListenPort}`,
     '--peer-id-prefix=-qB4630-',
     '--peer-agent=qBittorrent/4.6.3', // 伪装 BEP 10 扩展握手 Client Agent，避免被海外做种者或防吸血策略 Choke
     '--user-agent=qBittorrent/4.6.3',
@@ -236,6 +241,8 @@ export async function downloadViaAria2(
   }
 
   // 注入 Tracker 参数与任务目录
+  // 核心：强制排除种子文件或磁力链接内嵌的过时/已死历史 Tracker，确保所有请求均打在全网活跃的最新高可用 Tracker 上
+  args.push('--bt-exclude-tracker=*')
   args.push(`--bt-tracker=${trackerArg}`)
   args.push('--follow-torrent=mem')
   args.push(`--dir=${taskDir}`)
@@ -520,7 +527,7 @@ export async function downloadTorrentItem(
   onProgress?: (progressStr: string) => void,
   trackerManager?: TrackerManager,
   customTrackers: string[] = [],
-  listenPort = '51413-51425'
+  listenPort = '51413-51425,6881-6999,16881-16899'
 ): Promise<DownloadResult> {
   const aria2Bin = resolveAria2Binary(customAria2Path)
 

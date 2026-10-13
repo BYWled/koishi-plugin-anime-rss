@@ -180,7 +180,7 @@ export function registerCommands(
 
       if (options?.update) {
         await session?.send('📡 正在从全网优质镜像源同步最新 BT Tracker 列表，请稍候...')
-        const count = await trackerManager.syncTrackers(ctx, true)
+        const count = await trackerManager.syncTrackers(ctx, true, config.customTrackers || [])
         return `✅ Tracker 同步完成！当前池中活跃 Tracker 总数：${count} 个（已持久化缓存并就绪）。`
       }
 
