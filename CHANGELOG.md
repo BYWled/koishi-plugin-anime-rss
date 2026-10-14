@@ -2,6 +2,13 @@
 
 本项目的所有关键更改都将记录在此文件中。
 
+### [1.0.3]
+
+#### 🐛 Bug Fixes & Robustness (容错性与回连优化)
+
+- **host-sanitization**: 自动规范化并清洗 `serverHost` 配置，强力剔除误填入的 `http://` / `https://` 协议前缀及尾部斜杠与路径，彻底杜绝构造出形如 `http://http://...` 进而触发协议端底层 DNS 解析异常（`getaddrinfo ENOTFOUND http`, retcode 1200）的问题。
+- **host-port-parsing**: 增强容错，自动识别并拆解 `serverHost` 中附带的自定义端口（如 `host:port`）。
+
 ### [1.0.2]
 
 #### 🚀 P2P & Tracker Breakthrough (P2P与Tracker彻底提速)

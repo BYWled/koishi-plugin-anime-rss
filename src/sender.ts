@@ -60,6 +60,33 @@ export function getLocalIpForRemote(remoteHost: string): string {
 }
 
 /**
+ * Normalizes host strings by stripping protocol schemes (e.g. http://, https://), paths, and trailing slashes.
+ * Also extracts port if the user provided host:port.
+ */
+export function parseHostAndPort(rawHost?: string, rawPort = 0): { host: string; port: number } {
+  if (!rawHost) return { host: '', port: rawPort }
+  let cleaned = rawHost.trim()
+  cleaned = cleaned.replace(/^[a-zA-Z]+:\/\//, '')
+  cleaned = cleaned.split('/')[0].trim()
+
+  let port = rawPort
+  if (cleaned.includes(':') && !cleaned.startsWith('[')) {
+    const parts = cleaned.split(':')
+    if (parts.length === 2 && !isNaN(Number(parts[1]))) {
+      cleaned = parts[0]
+      if (port === 0) {
+        port = Number(parts[1])
+      }
+    }
+  }
+  return { host: cleaned, port }
+}
+
+export function sanitizeHost(host: string): string {
+  return parseHostAndPort(host).host
+}
+
+/**
  * Spawns a lightweight, token-protected temporary HTTP file streaming server.
  * Streams directly from disk with zero memory buffering.
  */
@@ -69,6 +96,10 @@ export async function createTemporaryFileServer(
   preferredPort = 0,
   logger?: Logger
 ): Promise<{ url: string; close: () => void }> {
+  const parsed = parseHostAndPort(preferredHost, preferredPort)
+  const cleanHost = parsed.host || '127.0.0.1'
+  const targetPort = parsed.port
+
   const token = crypto.randomBytes(8).toString('hex')
   const baseName = path.basename(filePath)
   const encodedName = encodeURIComponent(baseName)
@@ -108,13 +139,13 @@ export async function createTemporaryFileServer(
   server.setTimeout(30 * 60 * 1000)
 
   await new Promise<void>((resolve, reject) => {
-    server.listen(preferredPort, '0.0.0.0', () => resolve())
+    server.listen(targetPort, '0.0.0.0', () => resolve())
     server.on('error', reject)
   })
 
   const addr = server.address() as any
   const port = addr.port
-  const url = `http://${preferredHost}:${port}/${token}/${encodedName}`
+  const url = `http://${cleanHost}:${port}/${token}/${encodedName}`
 
   return {
     url,
@@ -313,8 +344,10 @@ export async function pushAnimeVideo(
     // Remote or local fallback: Stream file via temporary HTTP server
     let tempServer: { url: string; close: () => void } | null = null
     try {
-      const localIp = serverHost || getLocalIpForRemote(remoteHost)
-      tempServer = await createTemporaryFileServer(absolutePath, localIp, serverPort, logger)
+      const parsedConfig = parseHostAndPort(serverHost, serverPort)
+      const localIp = parsedConfig.host || getLocalIpForRemote(remoteHost)
+      const effectivePort = parsedConfig.port
+      tempServer = await createTemporaryFileServer(absolutePath, localIp, effectivePort, logger)
       logger?.info?.(`[push] Serving video stream to OneBot adapter at: ${tempServer.url}`)
 
       await invokeOneBotAction(

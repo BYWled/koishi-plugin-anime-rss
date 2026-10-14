@@ -94,7 +94,7 @@ export const Config: Schema<Config> = Schema.intersect([
 
   Schema.object({
     serverHost: Schema.string()
-      .description('跨机/容器协议端回连 IP 或域名（留空自动探测与协议端同网段的内网 IP；Docker 或跨主机部署若无法直通可在此手动填写）'),
+      .description('跨机/容器协议端回连 IP 或域名（填写纯 IP 或域名如 192.168.1.100，无需加 http://；留空则自动探测与协议端同网段的内网 IP）'),
     serverPort: Schema.number()
       .default(0)
       .description('文件传输临时 HTTP 服务端口（0 为使用系统随机空闲端口）'),

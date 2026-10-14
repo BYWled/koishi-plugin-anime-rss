@@ -9,7 +9,25 @@ import {
   createTemporaryFileServer,
   invokeOneBotAction,
   pushAnimeVideo,
+  parseHostAndPort,
+  sanitizeHost,
 } from '../src/sender'
+
+test('sender: parseHostAndPort and sanitizeHost correctly normalize user inputs', () => {
+  assert.equal(sanitizeHost('http://192.168.192.43'), '192.168.192.43')
+  assert.equal(sanitizeHost('https://192.168.192.43/'), '192.168.192.43')
+  assert.equal(sanitizeHost('http://192.168.192.43:53940/path'), '192.168.192.43')
+  assert.equal(sanitizeHost('192.168.192.43'), '192.168.192.43')
+  assert.equal(sanitizeHost('  http://example.com/  '), 'example.com')
+
+  const parsed = parseHostAndPort('http://192.168.192.43:1238', 0)
+  assert.equal(parsed.host, '192.168.192.43')
+  assert.equal(parsed.port, 1238)
+
+  const parsedDefault = parseHostAndPort('192.168.192.43', 8080)
+  assert.equal(parsedDefault.host, '192.168.192.43')
+  assert.equal(parsedDefault.port, 8080)
+})
 
 test('sender: getLocalIpForRemote handles localhost and remote hosts', () => {
   assert.equal(getLocalIpForRemote('127.0.0.1'), '127.0.0.1')
@@ -18,6 +36,19 @@ test('sender: getLocalIpForRemote handles localhost and remote hosts', () => {
 
   const ip = getLocalIpForRemote('192.168.192.216')
   assert.ok(typeof ip === 'string' && ip.length > 0)
+})
+
+test('sender: createTemporaryFileServer sanitizes http:// in host and prevents http://http:// duplication', async () => {
+  const tempPath = path.resolve('temp_test_proto.txt')
+  fs.writeFileSync(tempPath, 'Hello Protocol Sanitize')
+  try {
+    const serverInfo = await createTemporaryFileServer(tempPath, 'http://127.0.0.1', 0)
+    assert.ok(!serverInfo.url.includes('http://http://'))
+    assert.ok(serverInfo.url.startsWith('http://127.0.0.1:'))
+    serverInfo.close()
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+  }
 })
 
 test('sender: createTemporaryFileServer streams file via HTTP with zero memory buffer', async () => {

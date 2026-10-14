@@ -21,6 +21,15 @@ export interface PushResult {
  */
 export declare function getLocalIpForRemote(remoteHost: string): string;
 /**
+ * Normalizes host strings by stripping protocol schemes (e.g. http://, https://), paths, and trailing slashes.
+ * Also extracts port if the user provided host:port.
+ */
+export declare function parseHostAndPort(rawHost?: string, rawPort?: number): {
+    host: string;
+    port: number;
+};
+export declare function sanitizeHost(host: string): string;
+/**
  * Spawns a lightweight, token-protected temporary HTTP file streaming server.
  * Streams directly from disk with zero memory buffering.
  */
