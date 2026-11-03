@@ -141,7 +141,26 @@ export async function downloadViaAria2(
   customTrackers: string[] = [],
   listenPort = '51413-51425,6881-6999,16881-16899'
 ): Promise<DownloadResult> {
-  const taskId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  // 检查是否已有先前成功下载完毕的番剧文件（例如先前上传失败后轮询重试），若有则直接复用避免重复从 P2P 耗时下载
+  if (source.infoHash) {
+    const existingTaskDir = path.join(outputDir, source.infoHash.toLowerCase())
+    const existingVideo = findVideoFileRecursive(existingTaskDir)
+    if (existingVideo && existingVideo.size > 1024 * 1024) {
+      onProgress?.(
+        `检测到本地已存在已下载完成的番剧视频: ${existingVideo.fileName} (${(existingVideo.size / (1024 * 1024)).toFixed(1)}MB)，直接复用并准备推送`
+      )
+      return {
+        filePath: existingVideo.filePath,
+        fileName: existingVideo.fileName,
+        fileSize: existingVideo.size,
+        infoHash: source.infoHash,
+      }
+    }
+  }
+
+  const taskId = source.infoHash
+    ? source.infoHash.toLowerCase()
+    : `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   const taskDir = path.join(outputDir, taskId)
   await fs.promises.mkdir(taskDir, { recursive: true })
 

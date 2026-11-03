@@ -3,6 +3,7 @@ import path from 'path'
 import http from 'http'
 import os from 'os'
 import crypto from 'crypto'
+import dgram from 'dgram'
 import { pathToFileURL } from 'url'
 import { Bot, h, Logger } from 'koishi'
 
@@ -60,13 +61,53 @@ export function getLocalIpForRemote(remoteHost: string): string {
 }
 
 /**
+ * Asynchronously determines the exact local IP routed by the OS kernel to the remote host.
+ */
+export async function getLocalIpForRemoteAsync(remoteHost: string): Promise<string> {
+  if (['127.0.0.1', 'localhost', '::1'].includes(remoteHost)) {
+    return '127.0.0.1'
+  }
+
+  // 1. Ask OS kernel routing table via UDP socket
+  const kernelIp = await new Promise<string | null>((resolve) => {
+    try {
+      const socket = dgram.createSocket('udp4')
+      socket.connect(80, remoteHost, () => {
+        try {
+          const addr = socket.address().address
+          socket.close()
+          resolve(addr && addr !== '0.0.0.0' ? addr : null)
+        } catch {
+          resolve(null)
+        }
+      })
+      socket.on('error', () => {
+        try {
+          socket.close()
+        } catch {}
+        resolve(null)
+      })
+    } catch {
+      resolve(null)
+    }
+  })
+
+  if (kernelIp) return kernelIp
+
+  // 2. Fallback to subnet and interface inspection
+  return getLocalIpForRemote(remoteHost)
+}
+
+/**
  * Normalizes host strings by stripping protocol schemes (e.g. http://, https://), paths, and trailing slashes.
  * Also extracts port if the user provided host:port.
  */
 export function parseHostAndPort(rawHost?: string, rawPort = 0): { host: string; port: number } {
   if (!rawHost) return { host: '', port: rawPort }
   let cleaned = rawHost.trim()
-  cleaned = cleaned.replace(/^[a-zA-Z]+:\/\//, '')
+  while (/^[a-zA-Z]+:\/\//.test(cleaned)) {
+    cleaned = cleaned.replace(/^[a-zA-Z]+:\/\//, '')
+  }
   cleaned = cleaned.split('/')[0].trim()
 
   let port = rawPort
@@ -88,14 +129,14 @@ export function sanitizeHost(host: string): string {
 
 /**
  * Spawns a lightweight, token-protected temporary HTTP file streaming server.
- * Streams directly from disk with zero memory buffering.
+ * Streams directly from disk with zero memory buffering. Supports HEAD and Range requests.
  */
 export async function createTemporaryFileServer(
   filePath: string,
   preferredHost = '127.0.0.1',
   preferredPort = 0,
   logger?: Logger
-): Promise<{ url: string; close: () => void }> {
+): Promise<{ url: string; close: (force?: boolean) => void; isTransferring: () => boolean }> {
   const parsed = parseHostAndPort(preferredHost, preferredPort)
   const cleanHost = parsed.host || '127.0.0.1'
   const targetPort = parsed.port
@@ -107,6 +148,9 @@ export async function createTemporaryFileServer(
   const fileSize = stat.size
   const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(1)
 
+  let activeTransfers = 0
+  let isClosed = false
+
   const server = http.createServer((req, res) => {
     const reqUrl = req.url || ''
     if (!reqUrl.includes(token)) {
@@ -115,6 +159,62 @@ export async function createTemporaryFileServer(
       return
     }
 
+    // Support HEAD method (many downloaders probe size first)
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': fileSize,
+        'Content-Disposition': `attachment; filename="${encodedName}"`,
+        'Accept-Ranges': 'bytes',
+      })
+      res.end()
+      return
+    }
+
+    // Support Range requests (206 Partial Content)
+    const range = req.headers.range
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-')
+      const start = parseInt(parts[0], 10)
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1
+
+      if (isNaN(start) || isNaN(end) || start > end || start >= fileSize) {
+        res.writeHead(416, { 'Content-Range': `bytes */${fileSize}` })
+        res.end()
+        return
+      }
+
+      const chunkSize = end - start + 1
+      activeTransfers++
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunkSize,
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${encodedName}"`,
+      })
+
+      const stream = fs.createReadStream(filePath, { start, end })
+      stream.pipe(res)
+
+      const cleanup = () => {
+        activeTransfers = Math.max(0, activeTransfers - 1)
+      }
+      res.on('finish', cleanup)
+      res.on('close', () => {
+        stream.destroy()
+        cleanup()
+      })
+      stream.on('error', () => {
+        if (!res.headersSent) res.writeHead(500)
+        res.end()
+        cleanup()
+      })
+      return
+    }
+
+    // Standard 200 GET
+    activeTransfers++
     res.writeHead(200, {
       'Content-Type': 'application/octet-stream',
       'Content-Length': fileSize,
@@ -124,14 +224,24 @@ export async function createTemporaryFileServer(
 
     const stream = fs.createReadStream(filePath)
     stream.pipe(res)
+
+    const cleanup = () => {
+      activeTransfers = Math.max(0, activeTransfers - 1)
+    }
     res.on('finish', () => {
       logger?.info?.(
         `[push] Video stream fully transferred to OneBot adapter (${fileSizeMB}MB). Waiting for adapter to finish uploading to QQ group...`
       )
+      cleanup()
+    })
+    res.on('close', () => {
+      stream.destroy()
+      cleanup()
     })
     stream.on('error', () => {
       if (!res.headersSent) res.writeHead(500)
       res.end()
+      cleanup()
     })
   })
 
@@ -149,12 +259,67 @@ export async function createTemporaryFileServer(
 
   return {
     url,
-    close: () => {
-      try {
-        server.close()
-      } catch {}
+    isTransferring: () => activeTransfers > 0,
+    close: (force = false) => {
+      if (isClosed) return
+      if (!force && activeTransfers > 0) {
+        // Wait until ongoing transfer finishes before closing
+        const checkInterval = setInterval(() => {
+          if (activeTransfers <= 0) {
+            clearInterval(checkInterval)
+            if (!isClosed) {
+              isClosed = true
+              try {
+                server.close()
+              } catch {}
+            }
+          }
+        }, 1000)
+        setTimeout(() => {
+          clearInterval(checkInterval)
+          if (!isClosed) {
+            isClosed = true
+            try {
+              server.close()
+            } catch {}
+          }
+        }, 60000)
+      } else {
+        isClosed = true
+        try {
+          server.close()
+        } catch {}
+      }
     },
   }
+}
+
+/**
+ * Resolves the underlying WebSocket socket object from Bot or Bot.adapter across all protocol modes (ws, ws-reverse).
+ */
+export function getBotSocket(bot: Bot): any {
+  if ((bot.adapter as any)?.socket) return (bot.adapter as any).socket
+  if ((bot as any)?.socket) return (bot as any).socket
+
+  // Check symbol properties on bot (e.g. kSocket in ws-reverse)
+  for (const sym of Object.getOwnPropertySymbols(bot)) {
+    const val = (bot as any)[sym]
+    if (val && typeof val.send === 'function') {
+      return val
+    }
+  }
+
+  // Check symbol properties on bot.adapter
+  if (bot.adapter) {
+    for (const sym of Object.getOwnPropertySymbols(bot.adapter)) {
+      const val = (bot.adapter as any)[sym]
+      if (val && typeof val.send === 'function') {
+        return val
+      }
+    }
+  }
+
+  return null
 }
 
 /**
@@ -168,7 +333,7 @@ export async function invokeOneBotAction(
   timeoutMs = 10 * 60 * 1000,
   logger?: Logger
 ): Promise<any> {
-  const socket = (bot.adapter as any)?.socket || (bot as any)?.socket
+  const socket = getBotSocket(bot)
 
   if (socket && typeof socket.send === 'function') {
     const echo = `rss_anime_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -209,7 +374,13 @@ export async function invokeOneBotAction(
           const parsed = JSON.parse(raw)
           if (parsed && String(parsed.echo) === echo) {
             cleanup()
-            if (parsed.retcode === 0 || parsed.status === 'ok') {
+            // retcode: 0 is sync success; retcode: 1 / status: 'async' is asynchronous task accepted in OneBot standard
+            if (
+              parsed.retcode === 0 ||
+              parsed.retcode === 1 ||
+              parsed.status === 'ok' ||
+              parsed.status === 'async'
+            ) {
               resolve(parsed.data)
             } else {
               reject(
@@ -250,14 +421,25 @@ export async function invokeOneBotAction(
   throw new Error(`OneBot action ${action} is not supported on this adapter`)
 }
 
-function extractRemoteHost(bot: Bot): string {
+export function extractRemoteHost(bot: Bot, socket?: any): string {
   try {
     const ep = (bot.config as any)?.endpoint
     if (ep) {
       const parsed = new URL(ep)
-      return parsed.hostname
+      if (parsed.hostname) return parsed.hostname
     }
   } catch {}
+
+  // Check socket remoteAddress if available (e.g. reverse WebSocket)
+  try {
+    const sock = socket || getBotSocket(bot)
+    const remote = sock?._socket?.remoteAddress || sock?.remoteAddress
+    if (remote) {
+      const clean = remote.replace(/^::ffff:/, '')
+      if (clean) return clean
+    }
+  } catch {}
+
   return '127.0.0.1'
 }
 
@@ -279,7 +461,11 @@ export async function pushAnimeVideo(
   } = options
 
   if (!fs.existsSync(filePath)) {
-    throw new Error(`Target file does not exist: ${filePath}`)
+    return {
+      success: false,
+      mode: 'video',
+      error: `Target file does not exist: ${filePath}`,
+    }
   }
 
   const stat = await fs.promises.stat(filePath)
@@ -287,11 +473,14 @@ export async function pushAnimeVideo(
   const absolutePath = path.resolve(filePath)
   const fileUrl = pathToFileURL(absolutePath).href
 
-  // Extract clean target group/channel id (e.g. 'onebot:123456' -> '123456')
+  // Clean target group/channel id (e.g. 'onebot:123456' -> '123456')
   const cleanTargetId = channelId.includes(':')
     ? channelId.split(':')[1]
     : channelId
-  const targetGid = Number(cleanTargetId) || cleanTargetId
+  const targetGid = /^\d+$/.test(cleanTargetId) ? Number(cleanTargetId) : cleanTargetId
+
+  // Sanitize file name for QQ group files (prohibit \ / : * ? " < > |)
+  const cleanFileName = fileName.replace(/[\\/:*?"<>|]/g, '_')
 
   // Mode 1: <= Threshold -> Direct video message
   if (sizeMB <= videoSizeThresholdMB) {
@@ -303,18 +492,21 @@ export async function pushAnimeVideo(
       ])
       return { success: true, mode: 'video' }
     } catch (err: any) {
-      logger?.warn?.(`[push] Failed to send regular video message: ${err?.message}. Attempting group file upload fallback.`)
+      logger?.warn?.(
+        `[push] Failed to send regular video message: ${err?.message}. Attempting group file upload fallback.`
+      )
     }
   }
 
   // Mode 2: > Threshold or regular video failed -> OneBot upload_group_file
+  const socket = getBotSocket(bot)
   const hasUploadGroupFile =
     typeof bot.internal?.uploadGroupFile === 'function' ||
     typeof bot.internal?.upload_group_file === 'function' ||
-    Boolean((bot.adapter as any)?.socket)
+    Boolean(socket)
 
   if (hasUploadGroupFile) {
-    const remoteHost = extractRemoteHost(bot)
+    const remoteHost = extractRemoteHost(bot, socket)
     const isRemote = !['127.0.0.1', 'localhost', '::1'].includes(remoteHost)
 
     logger?.info?.(
@@ -327,7 +519,7 @@ export async function pushAnimeVideo(
         await invokeOneBotAction(
           bot,
           'upload_group_file',
-          { group_id: targetGid, file: absolutePath, name: fileName },
+          { group_id: targetGid, file: absolutePath, name: cleanFileName },
           uploadTimeoutMs,
           logger
         )
@@ -342,10 +534,21 @@ export async function pushAnimeVideo(
     }
 
     // Remote or local fallback: Stream file via temporary HTTP server
-    let tempServer: { url: string; close: () => void } | null = null
+    let tempServer: { url: string; close: (force?: boolean) => void } | null = null
     try {
       const parsedConfig = parseHostAndPort(serverHost, serverPort)
-      const localIp = parsedConfig.host || getLocalIpForRemote(remoteHost)
+      let localIp = parsedConfig.host
+
+      // Guard: If user accidentally configured serverHost as the remote bot's IP
+      if (localIp && isRemote && localIp === remoteHost) {
+        logger?.warn?.(
+          `[push] 配置的 serverHost (${localIp}) 与协议端 remoteHost 相同！serverHost 必须是运行 Koishi 的机器 IP，已自动切换为内核路由探测 IP。`
+        )
+        localIp = await getLocalIpForRemoteAsync(remoteHost)
+      } else if (!localIp) {
+        localIp = await getLocalIpForRemoteAsync(remoteHost)
+      }
+
       const effectivePort = parsedConfig.port
       tempServer = await createTemporaryFileServer(absolutePath, localIp, effectivePort, logger)
       logger?.info?.(`[push] Serving video stream to OneBot adapter at: ${tempServer.url}`)
@@ -353,7 +556,7 @@ export async function pushAnimeVideo(
       await invokeOneBotAction(
         bot,
         'upload_group_file',
-        { group_id: targetGid, file: tempServer.url, name: fileName },
+        { group_id: targetGid, file: tempServer.url, name: cleanFileName },
         uploadTimeoutMs,
         logger
       )
@@ -365,19 +568,22 @@ export async function pushAnimeVideo(
       return { success: true, mode: 'group_file' }
     } catch (streamErr: any) {
       logger?.warn?.(`[push] upload_group_file failed: ${streamErr?.message}`)
+      return {
+        success: false,
+        mode: 'group_file',
+        error: `upload_group_file failed: ${streamErr?.message}`,
+      }
     } finally {
-      // Delay closing server slightly to allow final socket teardown
+      // Delay closing server slightly to allow ongoing socket streaming to complete
       setTimeout(() => {
-        tempServer?.close()
-      }, 5000)
+        tempServer?.close(false)
+      }, 10000)
     }
   }
 
-  // Mode 3: Fallback -> notify group with magnet link
+  // Mode 3: Fallback -> notify group with magnet link (only for adapters lacking group file upload capability)
   try {
-    const reason = !hasUploadGroupFile
-      ? `当前适配器不支持直接上传群文件，视频大小（${sizeMB.toFixed(1)}MB）超出群聊直发限制（${videoSizeThresholdMB}MB）`
-      : `视频过大且上传群文件失败`
+    const reason = `当前平台适配器不支持直接上传群文件，视频大小（${sizeMB.toFixed(1)}MB）超出群聊直发限制（${videoSizeThresholdMB}MB）`
 
     await bot.sendMessage(
       channelId,

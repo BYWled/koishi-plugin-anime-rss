@@ -6,6 +6,8 @@ import http from 'node:http'
 import { EventEmitter } from 'node:events'
 import {
   getLocalIpForRemote,
+  getLocalIpForRemoteAsync,
+  getBotSocket,
   createTemporaryFileServer,
   invokeOneBotAction,
   pushAnimeVideo,
@@ -16,9 +18,14 @@ import {
 test('sender: parseHostAndPort and sanitizeHost correctly normalize user inputs', () => {
   assert.equal(sanitizeHost('http://192.168.192.43'), '192.168.192.43')
   assert.equal(sanitizeHost('https://192.168.192.43/'), '192.168.192.43')
-  assert.equal(sanitizeHost('http://192.168.192.43:53940/path'), '192.168.192.43')
+  assert.equal(sanitizeHost('http://http://192.168.192.43'), '192.168.192.43')
+  assert.equal(sanitizeHost('http://https://192.168.192.43:53940/path'), '192.168.192.43')
   assert.equal(sanitizeHost('192.168.192.43'), '192.168.192.43')
   assert.equal(sanitizeHost('  http://example.com/  '), 'example.com')
+
+  const parsedMulti = parseHostAndPort('http://http://192.168.192.43:1238', 0)
+  assert.equal(parsedMulti.host, '192.168.192.43')
+  assert.equal(parsedMulti.port, 1238)
 
   const parsed = parseHostAndPort('http://192.168.192.43:1238', 0)
   assert.equal(parsed.host, '192.168.192.43')
@@ -258,6 +265,170 @@ test('sender: pushAnimeVideo for remote OneBot sends group file via streaming HT
     assert.ok(payload.params.file.startsWith('http://127.0.0.1:'), 'Should pass HTTP stream URL')
     assert.equal(payload.params.name, 'temp_large.mp4')
     assert.ok(sentMessages.some((m) => m.content.includes('已成功上传至群文件')))
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+  }
+})
+
+test('sender: createTemporaryFileServer handles HEAD and Range partial requests', async () => {
+  const tempPath = path.resolve('temp_test_range.txt')
+  fs.writeFileSync(tempPath, '0123456789ABCDEF')
+
+  try {
+    const serverInfo = await createTemporaryFileServer(tempPath, '127.0.0.1', 0)
+
+    // 1. HEAD request
+    const headRes = await new Promise<{ statusCode?: number; headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+      const url = new URL(serverInfo.url)
+      const req = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: 'HEAD',
+        },
+        (res) => {
+          resolve({ statusCode: res.statusCode, headers: res.headers })
+        }
+      )
+      req.on('error', reject)
+      req.end()
+    })
+    assert.equal(headRes.statusCode, 200)
+    assert.equal(headRes.headers['content-length'], '16')
+    assert.equal(headRes.headers['accept-ranges'], 'bytes')
+
+    // 2. Range request: bytes=4-9
+    const rangeContent = await new Promise<{ statusCode?: number; body: string; rangeHeader?: string }>(
+      (resolve, reject) => {
+        const url = new URL(serverInfo.url)
+        const req = http.request(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: 'GET',
+            headers: { Range: 'bytes=4-9' },
+          },
+          (res) => {
+            let body = ''
+            res.on('data', (c) => (body += c))
+            res.on('end', () =>
+              resolve({
+                statusCode: res.statusCode,
+                body,
+                rangeHeader: res.headers['content-range'],
+              })
+            )
+          }
+        )
+        req.on('error', reject)
+        req.end()
+      }
+    )
+    assert.equal(rangeContent.statusCode, 206)
+    assert.equal(rangeContent.body, '456789')
+    assert.equal(rangeContent.rangeHeader, 'bytes 4-9/16')
+
+    serverInfo.close(true)
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+  }
+})
+
+test('sender: invokeOneBotAction succeeds on OneBot retcode: 1 / status: "async"', async () => {
+  const emitter = new EventEmitter()
+  const mockSocket: any = {
+    send: (msg: string) => {
+      const data = JSON.parse(msg)
+      setTimeout(() => {
+        emitter.emit('message', {
+          data: JSON.stringify({
+            echo: data.echo,
+            status: 'async',
+            retcode: 1,
+            data: null,
+          }),
+        })
+      }, 20)
+    },
+    addEventListener: (event: string, handler: any) => {
+      emitter.on(event, handler)
+    },
+    removeEventListener: (event: string, handler: any) => {
+      emitter.off(event, handler)
+    },
+  }
+
+  const mockBot: any = {
+    adapter: { socket: mockSocket },
+  }
+
+  const result = await invokeOneBotAction(
+    mockBot,
+    'upload_group_file',
+    { group_id: 123456, file: 'http://test', name: 'async_test.mp4' },
+    5000
+  )
+
+  assert.equal(result, null)
+})
+
+test('sender: pushAnimeVideo returns success: false when upload_group_file fails', async () => {
+  const tempPath = path.resolve('temp_large_fail.mp4')
+  fs.writeFileSync(tempPath, Buffer.alloc(2 * 1024 * 1024, 0))
+
+  const emitter = new EventEmitter()
+  const mockSocket: any = {
+    send: (msg: string) => {
+      const data = JSON.parse(msg)
+      // Simulate remote OneBot reporting failure
+      setTimeout(() => {
+        emitter.emit('message', {
+          data: JSON.stringify({
+            echo: data.echo,
+            status: 'failed',
+            retcode: 1200,
+            message: 'getaddrinfo ENOTFOUND host',
+          }),
+        })
+      }, 20)
+    },
+    addEventListener: (event: string, handler: any) => {
+      emitter.on(event, handler)
+    },
+    removeEventListener: (event: string, handler: any) => {
+      emitter.off(event, handler)
+    },
+  }
+
+  const mockBot: any = {
+    platform: 'onebot',
+    config: {
+      endpoint: 'ws://192.168.192.216:3001',
+    },
+    adapter: {
+      socket: mockSocket,
+    },
+    sendMessage: async () => ['msg_fail'],
+    internal: {
+      uploadGroupFile: () => {},
+    },
+  }
+
+  try {
+    const res = await pushAnimeVideo(mockBot, {
+      channelId: '123456789',
+      filePath: tempPath,
+      title: 'Failed Anime Episode',
+      videoSizeThresholdMB: 1, // force Mode 2
+      serverHost: '127.0.0.1',
+      uploadTimeoutMs: 10000,
+    })
+
+    assert.equal(res.success, false, 'Failed upload must return success: false')
+    assert.equal(res.mode, 'group_file')
+    assert.ok(res.error?.includes('upload_group_file failed'))
   } finally {
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
   }

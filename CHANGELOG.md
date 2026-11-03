@@ -2,6 +2,18 @@
 
 本项目的所有关键更改都将记录在此文件中。
 
+### [1.0.5]
+
+#### 🐛 Bug Fixes & Reliability (推送容错与重试机制)
+
+- **retry-on-failure**: 彻底重构失败重试与历史记录机制：在解析、下载（含超时/死种熔断）、推送（含上传群文件/视频直发）任何环节失败时，严禁写入已推送历史数据库（`rss_anime_history`）；在下一轮订阅巡检时自动重试，杜绝因偶发网络波动导致漏推。
+- **download-cache-reuse**: 引入下载完成文件智能复用机制：若先前下载已成功但上传群文件时遭遇网络异常，下轮轮询时直接复用已下载完毕的本地视频并立即重试上传，无需重新耗时进行 P2P 下载。
+- **onebot-async-support**: 修复 OneBot 协议端异步上传任务被误判为报错的问题：适配 OneBot v11 规范中异步任务状态（`status: 'async'`, `retcode: 1`），防止 NapCat 等协议端被误判失败。
+- **onebot-ws-reverse-socket**: 修复在反向 WebSocket（`ws-reverse`）模式下无法捕获底层 Socket 进而回退到默认 60 秒硬超时的问题，完整支持 Symbol 属性提取与长耗时大文件传输。
+- **streaming-http-robustness**: 全面升级临时 HTTP 流式传输服务：完整支持 `HEAD` 请求与 `Range: bytes=start-end`（206 Partial Content）分块传输，并引入连接优雅关闭保护，杜绝协议端提前断连或并发探活导致的连接重置错误。
+- **host-misconfig-guard**: 增加协议端回连 IP 冲突自检防呆机制：当误将远程 Bot 自身 IP 填入 `serverHost` 时自动告警并更正为基于内核路由表探测的本机真实网卡 IP。
+- **filename-sanitize**: 自动过滤 QQ 群文件非法文件名字符（`\ / : * ? " < > |`），防止特殊符号导致群文件上传拒绝。
+
 ### [1.0.4]
 
 #### 🔒 Documentation & Privacy (隐私与文档脱敏)

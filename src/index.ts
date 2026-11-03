@@ -52,7 +52,7 @@ export const Config: Schema<Config> = Schema.intersect([
       .description('BT 与 DHT 监听端口范围（自带多段回退容灾，规避 Windows 端口排除与国内运营商 QoS 限速）'),
     stalledTimeout: Schema.number()
       .default(180)
-      .description('无做种者(死种)熔断时限（秒）。若在此时间内全网做种数(SD)持续为 0 且无流量，自动跳过并推送备用磁力链接，避免卡死下载队列'),
+      .description('无做种者(死种)熔断时限（秒）。若在此时间内全网做种数持续为 0 且无流量，自动中断本轮下载以释放队列；不计入数据库，下次轮询将自动重试'),
     downloadTimeout: Schema.number()
       .default(30)
       .description('单集种子下载超时时间（分钟），超时后自动中止释放'),
@@ -94,7 +94,7 @@ export const Config: Schema<Config> = Schema.intersect([
 
   Schema.object({
     serverHost: Schema.string()
-      .description('跨机/容器协议端回连 IP 或域名（填写纯 IP 或域名如 192.168.1.100，无需加 http://；留空则自动探测与协议端同网段的内网 IP）'),
+      .description('跨机/容器协议端回连 IP 或域名（填写运行 Koishi 的本机 IP，供远程 OneBot 连接下载视频文件，请勿填写 OneBot 自身的 IP！无需加 http://；留空则根据路由表自动探测）'),
     serverPort: Schema.number()
       .default(0)
       .description('文件传输临时 HTTP 服务端口（0 为使用系统随机空闲端口）'),
@@ -267,10 +267,15 @@ export function apply(ctx: Context, config: Config) {
             })
 
             // 推送到目标频道
+            let allPushesSuccessful = true
+            const pushErrors: string[] = []
+
             for (const ch of sub.channels) {
               const bot = resolveBot(sub.platform, ch)
               if (!bot) {
                 logger.warn(`No online bot found to push anime to channel ${ch}`)
+                allPushesSuccessful = false
+                pushErrors.push(`No online bot for ${ch}`)
                 continue
               }
 
@@ -288,68 +293,50 @@ export function apply(ctx: Context, config: Config) {
               })
 
               logger.info(
-                `Pushed "${item.title}" to ${ch} (mode: ${pushRes.mode}, success: ${pushRes.success})`
+                `Pushed "${item.title}" to ${ch} (mode: ${pushRes.mode}, success: ${pushRes.success}${pushRes.error ? `, error: ${pushRes.error}` : ''})`
               )
-            }
 
-            // 记录已推送历史
-            await recordPushedItem(ctx, {
-              subKey: sub.url,
-              guid: item.guid,
-              title: item.title,
-              torrentHash: item.infoHash,
-              fileSize: downloadResult.fileSize,
-            })
-
-            // 自动清理临时文件
-            if (config.autoClean && downloadResult.filePath) {
-              setTimeout(async () => {
-                try {
-                  if (fs.existsSync(downloadResult.filePath)) {
-                    await fs.promises.unlink(downloadResult.filePath)
-                    // Also clean up parent taskDir if empty or temp
-                    const parentDir = path.dirname(downloadResult.filePath)
-                    if (parentDir !== absoluteStoragePath && fs.existsSync(parentDir)) {
-                      await fs.promises.rm(parentDir, { recursive: true, force: true }).catch(() => {})
-                    }
-                    logger.info(`Cleaned up temporary video: ${downloadResult.filePath}`)
-                  }
-                } catch (cleanErr: any) {
-                  logger.warn(`Failed to clean up temp file: ${cleanErr?.message}`)
-                }
-              }, config.cleanDelay * 1000)
-            }
-          } catch (dlErr: any) {
-            logger.warn(`Download/push ended for "${item.title}": ${dlErr?.message}`)
-            const isStalled = String(dlErr?.message).includes('暂无活跃做种者')
-            const alertPrefix = isStalled ? '⚠️ 【番剧更新提醒】' : '⚠️ 【番剧下载失败】'
-            const alertReason = isStalled
-              ? '该资源全网暂无活跃做种者(做种数: 0)，已转为提供磁力链接供离线下载'
-              : `原因：${dlErr?.message}`
-
-            // 推送失败或死种告警
-            for (const ch of sub.channels) {
-              const bot = resolveBot(sub.platform, ch)
-              if (bot) {
-                bot.sendMessage(
-                  ch,
-                  `${alertPrefix}《${sub.name}》- ${item.title}\n${alertReason}\n${
-                    item.magnetUrl ? `备用磁力链接：\n${item.magnetUrl}` : ''
-                  }`
-                ).catch(() => {})
+              if (!pushRes.success) {
+                allPushesSuccessful = false
+                pushErrors.push(pushRes.error || `Push failed for ${ch}`)
               }
             }
 
-            // 若确认为死种，将该条记录入库防重，避免每轮轮询反复重试死种
-            if (isStalled) {
+            // 只有当所有目标频道均推送成功时，才计入数据库并清理临时文件
+            if (allPushesSuccessful && sub.channels.length > 0) {
               await recordPushedItem(ctx, {
                 subKey: sub.url,
                 guid: item.guid,
                 title: item.title,
                 torrentHash: item.infoHash,
-                fileSize: 0,
-              }).catch(() => {})
+                fileSize: downloadResult.fileSize,
+              })
+
+              // 自动清理临时文件
+              if (config.autoClean && downloadResult.filePath) {
+                setTimeout(async () => {
+                  try {
+                    if (fs.existsSync(downloadResult.filePath)) {
+                      await fs.promises.unlink(downloadResult.filePath)
+                      // Also clean up parent taskDir if empty or temp
+                      const parentDir = path.dirname(downloadResult.filePath)
+                      if (parentDir !== absoluteStoragePath && fs.existsSync(parentDir)) {
+                        await fs.promises.rm(parentDir, { recursive: true, force: true }).catch(() => {})
+                      }
+                      logger.info(`Cleaned up temporary video: ${downloadResult.filePath}`)
+                    }
+                  } catch (cleanErr: any) {
+                    logger.warn(`Failed to clean up temp file: ${cleanErr?.message}`)
+                  }
+                }, config.cleanDelay * 1000)
+              }
+            } else {
+              logger.warn(
+                `Push failed for "${item.title}" (${pushErrors.join('; ')}). 未计入数据库，将在下次轮询时重试。`
+              )
             }
+          } catch (dlErr: any) {
+            logger.warn(`Download failed for "${item.title}": ${dlErr?.message}。未计入数据库，将在下次轮询时重试。`)
           }
 
           if (maxItems && updatedCount >= maxItems) {
